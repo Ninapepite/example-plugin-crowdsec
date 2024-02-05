@@ -1,0 +1,141 @@
+version: '3.8'
+
+## Services docker 
+services:
+  traefik:
+    restart: unless-stopped
+    image: traefik:latest
+    command:
+      - --api.dashboard=true
+      - --providers.file.filename=/config.yml
+      - --providers.docker=true ## Logs for debugging
+      - --log.filePath=/var/log/crowdsec/traefik-tcpudp.log
+      - --log.level=DEBUG # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      ## Logs for Crowdsec
+      - --accessLog=true
+      - --accessLog.filePath=/var/log/crowdsec/traefik.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=204-299,400-499,500-59
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --certificatesresolvers.prodresolver.acme.email=email@domain.fr
+      - --certificatesresolvers.prodresolver.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.prodresolver.acme.keytype=RSA4096
+      - --certificatesresolvers.prodresolver.acme.tlschallenge=true
+      - --certificatesresolvers.prodresolver.acme.httpchallenge=true
+      - --certificatesresolvers.prodresolver.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.prodresolver.acme.storage=/letsencrypt/acme.json
+      - --experimental.plugins.crowdsec-bouncer-traefik-plugin.modulename=github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+      - --experimental.plugins.crowdsec-bouncer-traefik-plugin.version=v1.1.16
+    labels:
+      - traefik.enable=true
+      - "traefik.http.middlewares.nextcloudHeader.headers.stsSeconds=15552000"
+      - "traefik.http.middlewares.nextcloudHeader.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.nextcloudHeader.headers.stsPreload=true"
+      - "traefik.http.middlewares.nextcloudHeader.headers.forceSTSHeader=true"
+      - "traefik.http.routers.traefik_https.rule=Host(`traefik.domain.fr`)"
+      - "traefik.http.routers.traefik_https.entrypoints=websecure"
+      - "traefik.http.routers.traefik_https.tls=true"
+      - "traefik.http.routers.traefik_https.tls.certResolver=prodresolver"
+      - "traefik.http.routers.traefik_https.service=api@internal"
+      - "traefik.http.routers.traefik_https.middlewares=traefik-auth,crowdsec-traefikdash"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=zkandkad"
+      - "traefik.http.routers.http_traefik.rule=Host(`traefik.domain.fr`)"
+      - "traefik.http.routers.http_traefik.entrypoints=web"
+      - "traefik.http.routers.http_traefik.middlewares=https_redirect"
+      - "traefik.http.middlewares.https_redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.https_redirect.redirectscheme.permanent=true"
+      # Definitin of the middleware
+      - "traefik.http.middlewares.crowdsec-traefikdash.plugin.crowdsec-bouncer-traefik-plugin.enabled=true"
+      # crowdseclapikey must be unique to the middleware attached to the service
+      - "traefik.http.middlewares.crowdsec-traefikdash.plugin.crowdsec-bouncer-traefik-plugin.crowdseclapikey=knjabvhzdgadadza"
+
+    networks:
+      - proxy
+      - backend
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/log/crowdsec/:/var/log/crowdsec/
+      - "./letsencrypt-traefik:/letsencrypt"
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yml:/config.yml
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    networks:
+      - proxy
+      - backend
+    expose:
+      - "8080"
+    environment:
+      COLLECTIONS: "crowdsecurity/traefik crowdsecurity/http-cve crowdsecurity/sshd"
+      PGID: "1000"
+      BOUNCER_KEY_TRAEFIK: knjabvhzdgadadza
+    volumes:
+      - /var/log/crowdsec:/var/log/crowdsec
+      - /opt/crowdsec-db:/var/lib/crowdsec/data/
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/syslog.log:/logs/syslog.log:ro
+      - /opt/crowdsec:/etc/crowdsec/
+    labels:
+      - "traefik.enable=false"
+
+
+  ## Wordpress part
+  wordpress:
+    image: wordpress
+    restart: always
+    environment:
+      WORDPRESS_DB_HOST: dbwordpress
+      WORDPRESS_DB_USER: wordpress-user
+      WORDPRESS_DB_PASSWORD:  DKANKDNADA?LD
+      WORDPRESS_DB_NAME: wps_db
+    depends_on:
+      - dbwordpress
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    volumes:
+      - wordpress:/var/www/html
+    networks:
+      - frontend
+      - backend-wordpress
+      - backend
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.wordpress.rule=Host(`wordpress.fr`)
+      - traefik.http.routers.wordpress.tls=true
+      - traefik.http.routers.wordpress.entrypoints=websecure
+      - traefik.http.routers.wordpress.tls.certresolver=prodresolver
+      - traefik.http.services.wordpress.loadbalancer.server.port=80
+      - traefik.http.routers.wordpress.service=wordpress
+      - "traefik.http.routers.wordpress.middlewares=crowdsec-wordpress@docker"
+      # Definitin of the middleware
+      - "traefik.http.middlewares.crowdsec-wordpress.plugin.crowdsec-bouncer-traefik-plugin.enabled=true"
+      # crowdseclapikey must be unique to the middleware attached to the service
+      - "traefik.http.middlewares.crowdsec-wordpress.plugin.crowdsec-bouncer-traefik-plugin.crowdseclapikey=knjabvhzdgadadza"
+  dbwordpress:
+    image: mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: wps_db
+      MYSQL_USER: wordpress-user
+      MYSQL_PASSWORD: DKANKDNADA?LD
+      MYSQL_RANDOM_ROOT_PASSWORD: '1'
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    volumes:
+      - dbwordpress:/var/lib/mysql
+    networks:
+      - backend-wordpress
